@@ -376,6 +376,51 @@ function rewriteUrls(text, mirrorOrigin, mirrorHost) {
   return result;
 }
 
+/**
+ * Rewrite XML content (sitemaps, feeds, etc.) preserving namespace URIs.
+ * XML namespace URIs like http://www.sitemaps.org/schemas/sitemap/0.9 are
+ * identifiers, NOT fetchable URLs — they must stay as http://.
+ */
+function rewriteXmlContent(xml, mirrorOrigin, mirrorHost) {
+  if (!xml) return xml;
+  let result = xml;
+
+  // 1. Preserve XML namespace URIs before rewriting
+  const nsPlaceholders = [];
+  result = result.replace(/xmlns(?::[a-zA-Z0-9_-]+)?="([^"]+)"/g, (match) => {
+    const ph = `__XMLNS_${nsPlaceholders.length}__`;
+    nsPlaceholders.push(match);
+    return ph;
+  });
+  result = result.replace(/xsi:schemaLocation="([^"]+)"/g, (match) => {
+    const ph = `__XMLNS_${nsPlaceholders.length}__`;
+    nsPlaceholders.push(match);
+    return ph;
+  });
+
+  // 2. Rewrite source domain URLs to mirror domain
+  result = rewriteUrls(result, mirrorOrigin, mirrorHost);
+
+  // 3. Restore namespace URIs
+  for (let i = 0; i < nsPlaceholders.length; i++) {
+    result = result.replace(`__XMLNS_${i}__`, nsPlaceholders[i]);
+  }
+
+  // 4. Ensure XML declaration is present
+  result = result.trim();
+  if (!result.startsWith('<?xml')) {
+    result = '<?xml version="1.0" encoding="UTF-8"?>\n' + result;
+  }
+
+  // 5. Rewrite XSL stylesheet href to mirror domain if present
+  result = result.replace(
+    /(<\?xml-stylesheet[^?]*href=")https?:\/\/[^"]*?(\/[^"]*\.xsl)(")/g,
+    `$1${mirrorOrigin}$2$3`
+  );
+
+  return result;
+}
+
 function rewriteHtml(html, mirrorOrigin, mirrorHost, requestPath) {
   let rewritten = rewriteUrls(html, mirrorOrigin, mirrorHost);
 
@@ -649,6 +694,44 @@ app.get("/healthz", (req, res) => {
   res.status(200).json({ status: "ok", cfReady: cfCookies.length > 0 });
 });
 
+// ---------- FALLBACK SITEMAP GENERATOR ----------
+/**
+ * Generate a valid sitemap index XML if the source sitemap is broken/empty.
+ * This ensures Google can always discover the sub-sitemaps.
+ */
+function generateFallbackSitemapIndex(mirrorOrigin) {
+  const now = new Date().toISOString();
+  const sitemaps = [
+    "post-sitemap.xml",
+    "page-sitemap.xml",
+    "category-sitemap.xml",
+    "post_tag-sitemap.xml",
+  ];
+  const entries = sitemaps
+    .map(
+      (s) =>
+        `  <sitemap>\n    <loc>${mirrorOrigin}/${s}</loc>\n    <lastmod>${now}</lastmod>\n  </sitemap>`
+    )
+    .join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${entries}\n</sitemapindex>`;
+}
+
+/**
+ * Validate that XML content actually looks like a valid sitemap.
+ * Returns false if the content is an HTML page, CF challenge, or empty sitemap.
+ */
+function isValidSitemapXml(body) {
+  if (!body) return false;
+  const trimmed = body.trim();
+  // Must contain XML-like structure
+  if (!trimmed.includes("<urlset") && !trimmed.includes("<sitemapindex")) return false;
+  // Must contain at least one <loc> entry
+  if (!trimmed.includes("<loc>")) return false;
+  // Must NOT be a CF challenge or HTML page
+  if (trimmed.includes("Just a moment") || trimmed.includes("<!DOCTYPE html")) return false;
+  return true;
+}
+
 // ---------- MAIN PROXY HANDLER ----------
 
 app.all("*", async (req, res) => {
@@ -773,12 +856,24 @@ app.all("*", async (req, res) => {
 
     // --- DETERMINE CONTENT TYPE ---
     const ct = (responseHeaders["content-type"] || "text/html").toLowerCase();
-    const isHtml = ct.includes("text/html") || (!isAsset && !req.path.match(/\.\w{2,5}$/));
+    // IMPORTANT: Check XML BEFORE HTML — source may return text/html for .xml files
+    const isXml = ct.includes("xml") || req.path.endsWith(".xml");
+    const isHtml = !isXml && (ct.includes("text/html") || (!isAsset && !req.path.match(/\.\w{2,5}$/)));
     const isCss = ct.includes("text/css") || req.path.endsWith(".css");
     const isJs = ct.includes("javascript") || req.path.endsWith(".js");
-    const isXml = ct.includes("xml") || req.path.endsWith(".xml");
     const isRobotsTxt = req.path === "/robots.txt";
-    const contentCategory = isHtml ? "html" : (isCss || isJs || isXml || isRobotsTxt) ? "text" : "other";
+    const contentCategory = isXml ? "xml" : isHtml ? "html" : (isCss || isJs || isRobotsTxt) ? "text" : "other";
+
+    // --- SITEMAP FALLBACK: if source sitemap is broken, generate a valid one ---
+    const isSitemap = /sitemap[^/]*\.xml$/i.test(req.path);
+    if (isSitemap && contentCategory === "xml" && !isValidSitemapXml(bodyText)) {
+      console.log(`[SITEMAP] Source sitemap invalid/empty for ${req.path}, generating fallback`);
+      if (req.path === "/sitemap.xml" || req.path === "/sitemap_index.xml") {
+        bodyText = generateFallbackSitemapIndex(mirrorOrigin);
+      }
+      // For sub-sitemaps (post-sitemap.xml etc.) we keep the original even if broken,
+      // because we can't generate valid post URLs without crawling the site.
+    }
 
     // Cache the ORIGINAL content (before rewriting) so different hosts work
     if (req.method === "GET" && status >= 200 && status < 400) {
@@ -815,7 +910,11 @@ function sendRewrittenResponse(req, res, entry, mirrorOrigin, mirrorHost) {
   let bodyText = originalBody;
   const responseHeaders = { ...headers };
 
-  if (contentCategory === "html") {
+  if (contentCategory === "xml") {
+    bodyText = rewriteXmlContent(bodyText, mirrorOrigin, mirrorHost);
+    responseHeaders["Content-Type"] = "application/xml; charset=utf-8";
+    responseHeaders["Cache-Control"] = "public, max-age=3600, s-maxage=7200";
+  } else if (contentCategory === "html") {
     bodyText = rewriteHtml(bodyText, mirrorOrigin, mirrorHost, req.path);
     responseHeaders["Content-Type"] = "text/html; charset=utf-8";
     responseHeaders["X-Robots-Tag"] = "index, follow";
