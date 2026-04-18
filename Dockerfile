@@ -3,7 +3,7 @@ FROM node:20-slim
 # Install Chromium dependencies for Puppeteer (bundled Chrome)
 RUN apt-get update && apt-get install -y \
     fonts-liberation \
-    libasound2t64 \
+    libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
     libcups2 \
