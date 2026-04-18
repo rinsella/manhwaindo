@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: manhwaindo-mirror
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: SOURCE_HOST
+        value: www.manhwaindo.my
+      - key: MIRROR_HOST
+        sync: false
+      - key: NODE_ENV
+        value: production
+    healthCheckPath: /
+    autoDeploy: true
