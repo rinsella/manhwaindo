@@ -35,7 +35,7 @@ COPY . .
 EXPOSE 3000
 
 # Longer start period because browser needs to solve CF challenge on startup
-HEALTHCHECK --interval=30s --timeout=15s --start-period=90s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT:-3000}/ || exit 1
+HEALTHCHECK --interval=30s --timeout=15s --start-period=300s --retries=5 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT:-3000}/healthz || exit 1
 
 CMD ["node", "server.js"]

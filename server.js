@@ -644,6 +644,11 @@ function normalizeToSource(text) {
   return text;
 }
 
+// ---------- HEALTH CHECK ENDPOINT ----------
+app.get("/healthz", (req, res) => {
+  res.status(200).json({ status: "ok", cfReady: cfCookies.length > 0 });
+});
+
 // ---------- MAIN PROXY HANDLER ----------
 
 app.all("*", async (req, res) => {
@@ -867,23 +872,25 @@ function serveCachedResponse(req, res, cached, mirrorOrigin, mirrorHost) {
 async function startup() {
   console.log("[STARTUP] Initializing mirror proxy...");
 
-  try {
-    await solveCfChallenge(SOURCE_ORIGIN + "/");
-    console.log("[STARTUP] Initial CF challenge solved!");
-  } catch (e) {
-    console.warn(`[STARTUP] Could not solve CF on startup: ${e.message}`);
-    console.warn("[STARTUP] Will retry on first request...");
-  }
-
+  // Start HTTP server FIRST so healthchecks pass while CF challenge is solving
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`========================================`);
     console.log(`  Mirror Proxy Server Started`);
     console.log(`  Port: ${PORT}`);
     console.log(`  Source: ${SOURCE_ORIGIN}`);
     console.log(`  Mirror Host: ${MIRROR_HOST || "(auto-detect)"}`);
-    console.log(`  CF Cookies: ${cfCookies.length > 0 ? "YES ✓" : "Pending..."}`);
+    console.log(`  CF Cookies: Solving...`);
     console.log(`========================================`);
   });
+
+  try {
+    await solveCfChallenge(SOURCE_ORIGIN + "/");
+    console.log("[STARTUP] Initial CF challenge solved!");
+    console.log(`  CF Cookies: ${cfCookies.length > 0 ? "YES ✓" : "Pending..."}`);
+  } catch (e) {
+    console.warn(`[STARTUP] Could not solve CF on startup: ${e.message}`);
+    console.warn("[STARTUP] Will retry on first request...");
+  }
 }
 
 // Graceful shutdown
