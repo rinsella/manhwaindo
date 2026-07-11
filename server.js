@@ -23,6 +23,7 @@ const { load: cheerioLoad } = require("cheerio");
 const { LRUCache } = require("lru-cache");
 const puppeteer = require("puppeteer-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+const { isBlockedUrl, sanitizeDocument } = require("./ad-filter");
 
 puppeteer.use(StealthPlugin());
 
@@ -99,6 +100,40 @@ async function getBrowser() {
   }
 }
 
+async function configureBrowserPage(page) {
+  await page.setUserAgent(USER_AGENT);
+  await page.setExtraHTTPHeaders({
+    "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+  });
+  await page.setRequestInterception(true);
+
+  page.on("request", async (request) => {
+    try {
+      if (request.isInterceptResolutionHandled()) return;
+      if (isBlockedUrl(request.url())) {
+        console.log(`[BROWSER-BLOCK] ${request.url()}`);
+        await request.abort("blockedbyclient");
+      } else {
+        await request.continue();
+      }
+    } catch {}
+  });
+
+  await page.evaluateOnNewDocument(() => {
+    const nativeOpen = window.open;
+    window.open = function (url) {
+      if (!url || String(url).toLowerCase() === "about:blank") return null;
+      try {
+        const target = new URL(String(url), document.baseURI);
+        if (target.origin !== window.location.origin) return null;
+      } catch {
+        return null;
+      }
+      return nativeOpen.apply(this, arguments);
+    };
+  });
+}
+
 /**
  * Solve Cloudflare challenge and extract cookies
  */
@@ -107,10 +142,7 @@ async function solveCfChallenge(targetUrl) {
   const page = await b.newPage();
 
   try {
-    await page.setUserAgent(USER_AGENT);
-    await page.setExtraHTTPHeaders({
-      "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
-    });
+    await configureBrowserPage(page);
 
     console.log(`[CF-SOLVE] Navigating to ${targetUrl}...`);
     await page.goto(targetUrl, {
@@ -191,10 +223,7 @@ async function fetchWithBrowser(targetUrl) {
   const page = await b.newPage();
 
   try {
-    await page.setUserAgent(USER_AGENT);
-    await page.setExtraHTTPHeaders({
-      "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
-    });
+    await configureBrowserPage(page);
 
     if (cfCookies.length > 0) {
       await page.setCookie(...cfCookies);
@@ -422,109 +451,14 @@ function rewriteXmlContent(xml, mirrorOrigin, mirrorHost) {
 }
 
 function rewriteHtml(html, mirrorOrigin, mirrorHost, requestPath) {
-  let rewritten = rewriteUrls(html, mirrorOrigin, mirrorHost);
-
-  // Upgrade ALL http:// URLs to https:// (fixes mixed content for external domains)
-  rewritten = rewritten.replace(/http:\/\//g, 'https://');
+  // Upgrade source/external URLs before rewriting so an HTTP mirror stays HTTP.
+  let rewritten = html.replace(/http:\/\//g, "https://");
+  rewritten = rewriteUrls(rewritten, mirrorOrigin, mirrorHost);
 
   const $ = cheerioLoad(rewritten, { decodeEntities: false });
   const fullCanonical = `${mirrorOrigin}${requestPath}`;
 
-  // ---- REMOVE GAMBLING / JUDI ADS ----
-  // Known gambling/judi domains
-  const judiDomains = [
-    'gacor.zone', 'gacor.vin', 'cek.to', 'klik.zeus.fun', 'klik.top',
-    'klik.gg', 'klik.best', 'dub.link', 'happylink.pro', 'joiboy.ink',
-    'menujupenta.site', 'akseskaiko.cam', 'terbangrusia.site', 'kegz.site',
-    'goratu.site', 'bergurukecina.fun', 'injd.site', 'goid.space',
-    'orangarab.fun', 'tinyurl.com/momoplay', 'mamba.top-vip.online',
-    'wongso.top-vip.online', 'kps.link-mantap.ink',
-    'upload.gmbr.pro', 'kacu.gmbr.pro',
-    'tapme.ink',
-    'linkfast.asia',
-  ];
-  const judiPattern = judiDomains.map(d => d.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-  const judiRegex = new RegExp(judiPattern, 'i');
-
-  // Remove banner ad containers
-  $('div.blox.mlb.kln').remove();
-  $('div.blox.mlb').remove();
-  $('div.blox.kln').remove();
-
-  // Remove sticky bottom ad banners (fixed position ad overlays)
-  $('div[style*="position:fixed"][style*="bottom"]').each((_, el) => {
-    const html = $(el).html() || '';
-    if (html.includes('blox kln') || html.includes('btn_close.gif') || judiRegex.test(html)) {
-      $(el).remove();
-    }
-  });
-  $('div[style*="position: fixed"][style*="bottom"]').each((_, el) => {
-    const html = $(el).html() || '';
-    if (html.includes('blox kln') || html.includes('btn_close.gif') || judiRegex.test(html)) {
-      $(el).remove();
-    }
-  });
-
-  // Remove links to known gambling/judi domains
-  $('a[href]').each((_, el) => {
-    const href = $(el).attr('href') || '';
-    if (judiRegex.test(href)) {
-      $(el).remove();
-    }
-  });
-
-  // Remove ExoClick native widget ads
-  $('.exo-native-widget').remove();
-  $('div[data-uid]').each((_, el) => {
-    const html = $(el).html() || '';
-    if (html.includes('exo-native-widget') || html.includes('magsrv.com') || html.includes('z6v2p9a8.bkcdn.net')) {
-      $(el).remove();
-    }
-  });
-
-  // Remove ad network scripts and iframes
-  $('script[src*="pubadx.one"]').remove();
-  $('script[src*="onclckmn.com"]').remove();
-  $('script[src*="onclicka.js"]').remove();
-  $('div[id^="bg-ssp-"]').remove();
-  $('iframe[src*="a-ads.com"]').remove();
-  $('iframe[src*="onclckbn.net"]').remove();
-  $('iframe[data-aa]').remove();
-  $('[data-banner-id]').remove();
-
-  // Remove popunder/popup ad scripts
-  $('script').each((_, el) => {
-    const src = $(el).attr('src') || '';
-    const content = $(el).html() || '';
-    if (
-      src.includes('pubadx') || src.includes('onclckmn') || src.includes('onclicka') ||
-      src.includes('a-ads.com') || src.includes('juicyads') || src.includes('exoclick') ||
-      src.includes('magsrv.com') || src.includes('z6v2p9a8.bkcdn.net') ||
-      content.includes('ads-iframe') || content.includes('disqusads') ||
-      content.includes('setRealHref') || content.includes('exo-native-widget') ||
-      content.includes('magsrv.com') ||
-      // Popunder/click hijacker patterns
-      content.includes('puShown') || content.includes('doOpen1') ||
-      content.includes('initPu1') || content.includes('checkTarget') ||
-      content.includes('generateURL1') || content.includes('linkfast.asia') ||
-      content.includes('popundr') || content.includes('PopWidth1') ||
-      content.includes('PopHeight1') || content.includes('popads')
-    ) {
-      $(el).remove();
-    }
-  });
-
-  // Remove remaining ad iframes
-  $('iframe').each((_, el) => {
-    const src = $(el).attr('src') || '';
-    if (
-      src.includes('a-ads.com') || src.includes('onclckbn.net') ||
-      src.includes('pubadx') || src.includes('juicyads') || src.includes('exoclick')
-    ) {
-      $(el).remove();
-    }
-  });
-  // ---- END AD REMOVAL ----
+  sanitizeDocument($);
 
   // Add upgrade-insecure-requests as safety net for any remaining http links
   if (!$('meta[http-equiv="Content-Security-Policy"]').length) {

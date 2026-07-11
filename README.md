@@ -25,6 +25,8 @@ Full mirror reverse proxy untuk `www.manhwaindo.my` dengan fix SEO lengkap agar 
 - **Binary Passthrough** — Gambar, font, video langsung diproxy tanpa modifikasi
 - **Gzip/Brotli Support** — Decompress otomatis dari origin, re-compress ke client
 - **Cache Control** — Header cache yang optimal per tipe konten
+- **Pembersihan Iklan Berlapis** — Blokir jaringan iklan di Puppeteer, hapus script/iframe/banner dari HTML, dan cegah popup serta iklan dinamis di browser
+- **Perlindungan Konten** — CDN gambar komik tetap diizinkan agar cover dan halaman chapter tidak ikut terhapus
 
 ## Deploy
 
@@ -94,7 +96,15 @@ pm2 startup
 | `SOURCE_HOST` | `www.manhwaindo.my` | Domain asal yang dimirror |
 | `MIRROR_HOST` | _(auto-detect)_ | Domain mirror kamu. Kosongkan untuk auto-detect dari request header |
 | `PORT` | `3000` | Port server (Railway/Render set otomatis) |
-| `CUSTOM_UA` | `Mozilla/5.0 (compatible; MirrorBot/1.0)` | User-Agent untuk request ke origin |
+| `CUSTOM_UA` | Chrome desktop UA | User-Agent untuk request ke origin |
+
+## Pengujian
+
+Jalankan regresi sanitizer sebelum deploy:
+
+```bash
+npm test
+```
 
 ## Tips untuk Google Search Console
 
